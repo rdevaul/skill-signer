@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "skill-signer", email = "opensource@example.com"}
+    {name = "Dark Matter Lab", email = "rdevaul@gmail.com"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,9 +35,9 @@ dev = [
 skill-signer = "lib.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/example/skill-signer"
-Repository = "https://github.com/example/skill-signer.git"
-Issues = "https://github.com/example/skill-signer/issues"
+Homepage = "https://github.com/rdevaul/skill-signer"
+Repository = "https://github.com/rdevaul/skill-signer.git"
+Issues = "https://github.com/rdevaul/skill-signer/issues"
 
 [tool.setuptools]
 packages = ["lib"]
