@@ -365,5 +365,205 @@ def test_cli_trust_no_subcommand():
     assert "trust" in help_text
 
 
+
+# ---------------------------------------------------------------------------
+# New tests for UX improvements: Fix 1–4
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_keygen_with_name():
+    """Fix 1 – keygen accepts --name flag and creates the key."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        key_path = os.path.join(tmpdir, "named_key")
+
+        stdout, stderr, code = run_cli("keygen", "--output", key_path, "--name", "signer@example.com")
+
+        assert code == 0
+        assert os.path.exists(key_path)
+        assert os.path.exists(f"{key_path}.pub")
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_keygen_creates_meta_file():
+    """Fix 3 – keygen writes a .meta sidecar with the identity and a created timestamp."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        key_path = os.path.join(tmpdir, "meta_key")
+
+        stdout, stderr, code = run_cli("keygen", "--output", key_path, "--name", "meta@example.com")
+
+        assert code == 0
+        meta_path = f"{key_path}.meta"
+        assert os.path.exists(meta_path), f".meta sidecar not found at {meta_path}"
+
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+
+        assert meta.get("identity") == "meta@example.com"
+        assert "created" in meta
+        output = stdout + stderr
+        assert "Meta file" in output
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_keygen_comment_alias():
+    """Fix 1 – --comment still works as a hidden backward-compat alias."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        key_path = os.path.join(tmpdir, "compat_key")
+
+        # --comment is a hidden alias; it should still succeed and write the meta
+        stdout, stderr, code = run_cli("keygen", "--output", key_path, "--comment", "compat@example.com")
+
+        assert code == 0
+        meta_path = f"{key_path}.meta"
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        assert meta.get("identity") == "compat@example.com"
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_sign_uses_meta_file():
+    """Fix 3 – sign reads identity from the .meta sidecar when --identity is omitted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        skill_dir = Path(tmpdir) / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Test Skill")
+        (skill_dir / "main.py").write_text("print('hello')")
+
+        key_path = os.path.join(tmpdir, "signing_key")
+
+        # keygen via CLI creates the .meta sidecar
+        run_cli("keygen", "--output", key_path, "--name", "MetaIdentity@example.com")
+
+        # sign WITHOUT --identity flag; should auto-discover from .meta
+        stdout, stderr, code = run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            # intentionally omitting --identity
+        )
+
+        assert code == 0
+        output = stdout + stderr
+        # Identity must have been lowercased
+        assert "metaidentity@example.com" in output
+
+        # Manifest should record the lowercased identity
+        manifest = load_manifest(str(skill_dir / "MANIFEST.sig.json"))
+        assert manifest.author == "metaidentity@example.com"
+        assert manifest.signer.identity == "metaidentity@example.com"
+
+
+def test_cli_sign_missing_identity_no_meta():
+    """Fix 3 – sign without --identity and no .meta file gives a helpful error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        skill_dir = Path(tmpdir) / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "main.py").write_text("test")
+
+        # Write a bare key file (no .meta)
+        key_path = os.path.join(tmpdir, "bare_key")
+        Path(key_path).write_text("not-a-real-key")
+
+        stdout, stderr, code = run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            expect_success=False,
+        )
+
+        assert code != 0
+        assert "identity" in stderr.lower() or "identity" in stdout.lower()
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_trust_add_identity_from_pubkey():
+    """Fix 2 – trust add without identity arg reads it from the key comment."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+        key_path = os.path.join(tmpdir, "test_key")
+
+        # Generate with a recognisable comment that will become the identity
+        success, _ = generate_keypair(key_path, "autoident@example.com")
+        assert success
+
+        # Omit the identity positional – only pass the pubkey
+        stdout, stderr, code = run_cli(
+            "trust", "add", f"{key_path}.pub",
+            "--allowed-signers", allowed_signers,
+        )
+
+        assert code == 0
+        output = stdout + stderr
+        # Identity parsed from comment; should be lowercased
+        assert "autoident@example.com" in output
+        assert os.path.exists(allowed_signers)
+
+        # Verify the entry in the file uses the lowercased identity
+        from lib.trust import list_signers
+        signers = list_signers(allowed_signers)
+        assert any(s["identity"] == "autoident@example.com" for s in signers)
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_trust_add_no_identity_no_comment():
+    """Fix 2 – trust add without identity and a key with no comment gives a helpful error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+        # Create a pubkey file that has no comment field
+        pubkey_path = os.path.join(tmpdir, "nocomment.pub")
+        Path(pubkey_path).write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
+
+        stdout, stderr, code = run_cli(
+            "trust", "add", pubkey_path,
+            "--allowed-signers", allowed_signers,
+            expect_success=False,
+        )
+
+        assert code != 0
+        assert "identity" in stderr.lower() or "identity" in stdout.lower()
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_case_normalization():
+    """Fix 4 – uppercase identity is normalized to lowercase end-to-end (sign→verify)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        skill_dir = Path(tmpdir) / "case-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Case Skill")
+        (skill_dir / "main.py").write_text("test")
+
+        key_path = os.path.join(tmpdir, "key")
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+
+        success, _ = generate_keypair(key_path, "Case@Example.COM")
+        assert success
+
+        # Sign with a MIXED-CASE identity
+        run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            "--identity", "Case@Example.COM",
+            "--version", "0.1.0",
+        )
+
+        # Trust add with the same mixed-case identity (should be stored lowercased)
+        run_cli(
+            "trust", "add", "Case@Example.COM", f"{key_path}.pub",
+            "--allowed-signers", allowed_signers,
+        )
+
+        # Verify – the manifest stores the lowercased identity; verify should pass
+        stdout, stderr, code = run_cli(
+            "verify", str(skill_dir),
+            "--allowed-signers", allowed_signers,
+        )
+
+        assert code == 0
+        assert "Signature is valid" in stdout + stderr
+
+        # Also confirm the stored identity in the manifest is lowercased
+        manifest = load_manifest(str(skill_dir / "MANIFEST.sig.json"))
+        assert manifest.author == "case@example.com"
+        assert manifest.signer.identity == "case@example.com"
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
