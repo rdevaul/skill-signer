@@ -30,6 +30,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
 ]
+config = [
+    "pyyaml>=6.0",
+]
 
 [project.scripts]
 skill-signer = "lib.cli:main"

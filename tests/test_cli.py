@@ -565,5 +565,138 @@ def test_cli_case_normalization():
         assert manifest.signer.identity == "case@example.com"
 
 
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_verify_file_hashes_unmodified():
+    """Test that verify passes when all files are unmodified."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create and sign a test skill
+        skill_dir = Path(tmpdir) / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Test Skill")
+        (skill_dir / "main.py").write_text("print('hello')")
+        (skill_dir / "data.json").write_text('{"key": "value"}')
+
+        key_path = os.path.join(tmpdir, "key")
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+
+        # Generate key and sign
+        success, _ = generate_keypair(key_path, "test")
+        assert success
+
+        run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            "--identity", "test@example.com"
+        )
+
+        # Set up trust
+        run_cli(
+            "trust", "add", "test@example.com", f"{key_path}.pub",
+            "--allowed-signers", allowed_signers
+        )
+
+        # Verify should pass with unmodified files
+        stdout, stderr, code = run_cli(
+            "verify", str(skill_dir),
+            "--allowed-signers", allowed_signers
+        )
+
+        assert code == 0
+        output = stdout + stderr
+        assert "Signature is valid" in output
+        assert "All" in output and "files verified" in output
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_verify_file_modified():
+    """Test that verify fails when a file is modified after signing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create and sign a test skill
+        skill_dir = Path(tmpdir) / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Test Skill")
+        (skill_dir / "main.py").write_text("print('hello')")
+
+        key_path = os.path.join(tmpdir, "key")
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+
+        # Generate key and sign
+        success, _ = generate_keypair(key_path, "test")
+        assert success
+
+        run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            "--identity", "test@example.com"
+        )
+
+        # Set up trust
+        run_cli(
+            "trust", "add", "test@example.com", f"{key_path}.pub",
+            "--allowed-signers", allowed_signers
+        )
+
+        # Modify a file after signing
+        (skill_dir / "main.py").write_text("print('modified')")
+
+        # Verify should fail
+        stdout, stderr, code = run_cli(
+            "verify", str(skill_dir),
+            "--allowed-signers", allowed_signers,
+            expect_success=False
+        )
+
+        assert code != 0
+        output = stdout + stderr
+        assert "Modified files" in output
+        assert "main.py" in output
+
+
+@pytest.mark.skipif(not check_ssh_version()[0], reason="OpenSSH 8.0+ required")
+def test_cli_verify_file_missing():
+    """Test that verify fails when a file is removed after signing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create and sign a test skill
+        skill_dir = Path(tmpdir) / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Test Skill")
+        (skill_dir / "main.py").write_text("print('hello')")
+        (skill_dir / "data.json").write_text('{"key": "value"}')
+
+        key_path = os.path.join(tmpdir, "key")
+        allowed_signers = os.path.join(tmpdir, "allowed_signers")
+
+        # Generate key and sign
+        success, _ = generate_keypair(key_path, "test")
+        assert success
+
+        run_cli(
+            "sign", str(skill_dir),
+            "--key", key_path,
+            "--identity", "test@example.com"
+        )
+
+        # Set up trust
+        run_cli(
+            "trust", "add", "test@example.com", f"{key_path}.pub",
+            "--allowed-signers", allowed_signers
+        )
+
+        # Remove a file after signing
+        (skill_dir / "data.json").unlink()
+
+        # Verify should fail
+        stdout, stderr, code = run_cli(
+            "verify", str(skill_dir),
+            "--allowed-signers", allowed_signers,
+            expect_success=False
+        )
+
+        assert code != 0
+        output = stdout + stderr
+        assert "Missing files" in output
+        assert "data.json" in output
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

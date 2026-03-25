@@ -1,5 +1,7 @@
 # skill-signer
 
+![Tests](https://github.com/rdevaul/skill-signer/actions/workflows/publish.yml/badge.svg)
+
 Cryptographic signing for AI agent skills. Establishes provenance and trust for the agentic ecosystem.
 
 ## Why?
@@ -96,6 +98,36 @@ Identity matching is case-insensitive (normalized at our layer; SSH itself is ca
 skill-signer inspect <skill_dir> [--verbose]
 ```
 
+### `publish` — publish a signed skill (stub)
+
+```
+skill-signer publish <skill_dir> [--allowed-signers <path>]
+```
+
+Verifies the skill is signed and ready for publication. Shows what would be published to a registry. Full registry integration coming soon.
+
+## Configuration
+
+skill-signer supports optional configuration via `~/.config/skill-signer/config.yaml`:
+
+```yaml
+signing:
+  key: ~/.ssh/skill-signing-key
+  identity: your-email@example.com
+
+verification:
+  allowed_signers: ~/.config/skill-signer/allowed_signers
+  tofu: false
+```
+
+When configured, you can sign skills without specifying `--key` and `--identity` every time:
+
+```bash
+skill-signer sign ./my-skill
+```
+
+Configuration requires PyYAML: `pip install pyyaml` or `pip install skill-signer[config]`
+
 ## Identity & Case Normalization
 
 All commands that store or compare identities (sign, verify, trust add) normalize them to
@@ -111,9 +143,31 @@ same identity. The normalization happens at the `skill-signer` layer because the
 4. **Transitive trust** — Verify entire dependency tree
 5. **Revocation support** — Handle compromised keys gracefully
 
+## Comparison with Other Solutions
+
+| Feature | skill-signer | ClawHub | Sundial |
+|---------|--------------|---------|---------|
+| **Verification Method** | SSH Ed25519 cryptographic signatures | SHA-256 hash verification | Automated scanning (no crypto) |
+| **Publisher Identity** | Persistent key-based identity | No persistent identity | No cryptographic identity |
+| **Tamper Detection** | Cryptographic signature + file hashes | File hashes only | Pattern-based scanning |
+| **Revocation** | Built-in key revocation | N/A | N/A |
+| **Use Case** | Provenance & trust for skills | Skill distribution | Security scanning |
+
+**skill-signer vs ClawHub**: ClawHub uses SHA-256 hash verification to detect file tampering, but has no mechanism for persistent publisher identity. skill-signer uses SSH Ed25519 key-based provenance — the same model as git commit signing — to establish who published a skill and verify both authorship and integrity.
+
+**skill-signer vs Sundial**: Sundial provides automated security scanning for skills but does not use cryptographic signing. skill-signer complements security scanning with cryptographic provenance, enabling trust chains and accountability.
+
 ## Status
 
-🚧 **Under Development** — Contributions welcome!
+🟡 **Beta** — Core signing and verification complete. Registry integration in progress.
+
+All 62 tests passing. Production-ready for signing and verification workflows.
+
+## Roadmap
+
+- **v0.2** — Registry submission protocol (skill publishing to central/federated registries)
+- **v0.3** — TOFU (Trust On First Use) mode for automatic key acceptance
+- **v0.4** — Sigstore integration for transparency log
 
 See [SKILL.md](./SKILL.md) for the full specification.
 

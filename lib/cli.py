@@ -21,6 +21,7 @@ from . import (
     check_ssh_version,
 )
 from .trust import add_signer, revoke_signer, list_signers, fetch_pubkey
+from .config import load_config
 
 
 DEFAULT_CONFIG_DIR = os.path.expanduser("~/.config/skill-signer")
@@ -39,13 +40,32 @@ def cmd_sign(args):
         print(f"Error: Not a directory: {skill_dir}", file=sys.stderr)
         return 1
 
-    key_path = os.path.expanduser(args.key)
+    # Load config for defaults
+    config = load_config()
+
+    # Determine key path: from --key flag or from config
+    key_path = args.key
+    if not key_path:
+        key_path = config.signing_key
+        if key_path:
+            print(f"Using key from config: {key_path}")
+
+    if not key_path:
+        print(f"Error: --key is required (or set signing.key in ~/.config/skill-signer/config.yaml)", file=sys.stderr)
+        return 1
+
+    key_path = os.path.expanduser(key_path)
     if not os.path.exists(key_path):
         print(f"Error: Key not found: {key_path}", file=sys.stderr)
         return 1
 
-    # Determine identity: from --identity flag or from .meta sidecar file
+    # Determine identity: from --identity flag, config, or .meta sidecar file
     identity = args.identity
+    if not identity:
+        identity = config.signing_identity
+        if identity:
+            print(f"Using identity from config: {identity}")
+
     if not identity:
         meta_path = f"{key_path}.meta"
         if os.path.exists(meta_path):
@@ -115,7 +135,14 @@ def cmd_verify(args):
         print(f"Error: No manifest found: {manifest_path}", file=sys.stderr)
         return 1
 
-    allowed_signers = args.allowed_signers or DEFAULT_ALLOWED_SIGNERS
+    # Load config for defaults
+    config = load_config()
+
+    # Determine allowed_signers path: from --allowed-signers flag or from config
+    allowed_signers = args.allowed_signers
+    if not allowed_signers:
+        allowed_signers = config.verification_allowed_signers or DEFAULT_ALLOWED_SIGNERS
+
     if not os.path.exists(allowed_signers):
         print(f"Error: allowed_signers not found: {allowed_signers}", file=sys.stderr)
         print(f"Hint: Use 'skill-signer trust add' to add trusted signers")
@@ -154,9 +181,48 @@ def cmd_verify(args):
         if result.valid:
             print("✓ Signature is valid")
 
-            # TODO: Verify file hashes
-            print(f"✓ Manifest covers {len(manifest.files)} files")
+            # Verify file hashes
+            print(f"Verifying file hashes for {len(manifest.files)} files...")
 
+            from .manifest import hash_file
+
+            missing_files = []
+            modified_files = []
+
+            for file_path, expected_entry in manifest.files.items():
+                full_path = skill_dir / file_path
+
+                if not full_path.exists():
+                    missing_files.append(file_path)
+                    continue
+
+                # Compute current hash
+                try:
+                    current_entry = hash_file(full_path)
+
+                    if current_entry.sha256 != expected_entry.sha256:
+                        modified_files.append(file_path)
+                except Exception as e:
+                    print(f"✗ Error reading {file_path}: {e}", file=sys.stderr)
+                    return 1
+
+            # Report any issues
+            if missing_files or modified_files:
+                print(f"✗ File verification failed:", file=sys.stderr)
+
+                if missing_files:
+                    print(f"\nMissing files ({len(missing_files)}):", file=sys.stderr)
+                    for path in missing_files:
+                        print(f"  - {path}", file=sys.stderr)
+
+                if modified_files:
+                    print(f"\nModified files ({len(modified_files)}):", file=sys.stderr)
+                    for path in modified_files:
+                        print(f"  - {path}", file=sys.stderr)
+
+                return 1
+
+            print(f"✓ All {len(manifest.files)} files verified")
             return 0
         else:
             print(f"✗ Signature verification failed: {result.error}")
@@ -194,6 +260,37 @@ def cmd_keygen(args):
         # Show how to add to trusted signers (no identity required now)
         print(f"\nTo trust this key:")
         print(f"skill-signer trust add {output_path}.pub")
+
+        # Offer to create initial config file
+        from .config import DEFAULT_CONFIG_PATH, save_config, get_default_config_template
+
+        if not os.path.exists(DEFAULT_CONFIG_PATH):
+            print(f"\nWould you like to create a config file at {DEFAULT_CONFIG_PATH}?")
+            print(f"This will set default key and identity for signing. (y/n): ", end='', flush=True)
+
+            try:
+                response = input().strip().lower()
+                if response in ['y', 'yes']:
+                    config_data = {
+                        "signing": {
+                            "key": output_path,
+                            "identity": name,
+                        },
+                        "verification": {
+                            "allowed_signers": DEFAULT_ALLOWED_SIGNERS,
+                            "tofu": False,
+                        },
+                    }
+
+                    if save_config(config_data):
+                        print(f"✓ Config saved to {DEFAULT_CONFIG_PATH}")
+                        print(f"\nYou can now sign skills without --key and --identity flags:")
+                        print(f"skill-signer sign <skill-directory>")
+                    else:
+                        print(f"\nTo enable config support, install PyYAML:")
+                        print(f"pip install pyyaml")
+            except (EOFError, KeyboardInterrupt):
+                print()  # Just newline, skip config creation
 
         return 0
     else:
@@ -321,6 +418,124 @@ def cmd_trust_list(args):
         return 1
 
 
+def cmd_publish(args):
+    """Publish a signed skill to a registry (stub)."""
+    skill_dir = Path(args.skill_dir).resolve()
+    manifest_path = skill_dir / "MANIFEST.sig.json"
+
+    if not manifest_path.exists():
+        print(f"Error: No manifest found: {manifest_path}", file=sys.stderr)
+        print(f"Hint: Sign the skill first with 'skill-signer sign'", file=sys.stderr)
+        return 1
+
+    # Load config for defaults
+    config = load_config()
+
+    # Determine allowed_signers path for verification
+    allowed_signers = args.allowed_signers
+    if not allowed_signers:
+        allowed_signers = config.verification_allowed_signers or DEFAULT_ALLOWED_SIGNERS
+
+    if not os.path.exists(allowed_signers):
+        print(f"Error: allowed_signers not found: {allowed_signers}", file=sys.stderr)
+        print(f"Hint: Use 'skill-signer trust add' to add trusted signers, or use --allowed-signers")
+        return 1
+
+    try:
+        # Load and verify the manifest
+        print(f"Loading manifest from {manifest_path}...")
+        manifest = load_manifest(str(manifest_path))
+
+        if not manifest.signature or not manifest.signer:
+            print("Error: Manifest is not signed", file=sys.stderr)
+            return 1
+
+        print(f"Skill: {manifest.skill_name} v{manifest.skill_version}")
+        print(f"Author: {manifest.author}")
+        print(f"Signer: {manifest.signer.identity}")
+
+        # Verify signature
+        print("Verifying signature...")
+        payload = manifest.signing_payload()
+        identity = manifest.signer.identity.lower()
+
+        result = verify_data(
+            payload,
+            manifest.signature,
+            allowed_signers,
+            identity
+        )
+
+        if not result.valid:
+            print(f"✗ Signature verification failed: {result.error}", file=sys.stderr)
+            return 1
+
+        print("✓ Signature is valid")
+
+        # Verify file hashes
+        print(f"Verifying file hashes for {len(manifest.files)} files...")
+
+        from .manifest import hash_file
+
+        missing_files = []
+        modified_files = []
+
+        for file_path, expected_entry in manifest.files.items():
+            full_path = skill_dir / file_path
+
+            if not full_path.exists():
+                missing_files.append(file_path)
+                continue
+
+            try:
+                current_entry = hash_file(full_path)
+                if current_entry.sha256 != expected_entry.sha256:
+                    modified_files.append(file_path)
+            except Exception as e:
+                print(f"✗ Error reading {file_path}: {e}", file=sys.stderr)
+                return 1
+
+        if missing_files or modified_files:
+            print(f"✗ File verification failed:", file=sys.stderr)
+
+            if missing_files:
+                print(f"\nMissing files ({len(missing_files)}):", file=sys.stderr)
+                for path in missing_files:
+                    print(f"  - {path}", file=sys.stderr)
+
+            if modified_files:
+                print(f"\nModified files ({len(modified_files)}):", file=sys.stderr)
+                for path in modified_files:
+                    print(f"  - {path}", file=sys.stderr)
+
+            return 1
+
+        print(f"✓ All {len(manifest.files)} files verified")
+
+        # Show what would be published
+        print("\n" + "=" * 60)
+        print("PUBLISH PREVIEW")
+        print("=" * 60)
+        print(f"\nSkill would be published to registry with:")
+        print(f"  Name:     {manifest.skill_name}")
+        print(f"  Version:  {manifest.skill_version}")
+        print(f"  Author:   {manifest.author}")
+        print(f"  Files:    {len(manifest.files)}")
+        print(f"  Signer:   {manifest.signer.identity}")
+        print(f"  Key:      {manifest.signer.key_fingerprint}")
+
+        print("\n" + "=" * 60)
+        print("Skill is signed and ready to publish.")
+        print("Registry integration coming soon — see https://github.com/rdevaul/skill-signer for updates.")
+        print("=" * 60)
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_inspect(args):
     """Inspect a skill manifest without verifying."""
     skill_dir = Path(args.skill_dir).resolve()
@@ -382,10 +597,10 @@ def main():
     # skill-signer sign
     sign_parser = subparsers.add_parser('sign', help='Sign a skill directory')
     sign_parser.add_argument('skill_dir', help='Path to skill directory')
-    sign_parser.add_argument('--key', required=True, help='Path to SSH private key')
+    sign_parser.add_argument('--key', help='Path to SSH private key (or use config signing.key)')
     sign_parser.add_argument(
         '--identity',
-        help='Signer identity (email); auto-discovered from <key>.meta if omitted'
+        help='Signer identity (email); auto-discovered from config, <key>.meta, or key comment'
     )
     sign_parser.add_argument('--version', help='Skill version (auto-detected if not provided)')
     sign_parser.set_defaults(func=cmd_sign)
@@ -442,6 +657,12 @@ def main():
     inspect_parser.add_argument('skill_dir', help='Path to skill directory')
     inspect_parser.add_argument('--verbose', '-v', action='store_true', help='Show file details')
     inspect_parser.set_defaults(func=cmd_inspect)
+
+    # skill-signer publish
+    publish_parser = subparsers.add_parser('publish', help='Publish a signed skill (registry integration coming soon)')
+    publish_parser.add_argument('skill_dir', help='Path to skill directory')
+    publish_parser.add_argument('--allowed-signers', help=f'Path to allowed_signers file (default: {DEFAULT_ALLOWED_SIGNERS})')
+    publish_parser.set_defaults(func=cmd_publish)
 
     # Parse and execute
     args = parser.parse_args()
