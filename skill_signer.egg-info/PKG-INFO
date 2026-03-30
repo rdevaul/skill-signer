@@ -1,0 +1,208 @@
+Metadata-Version: 2.4
+Name: skill-signer
+Version: 0.1.0
+Summary: Cryptographic signing for AI agent skills using SSH Ed25519 keys
+Author-email: Dark Matter Lab <rdevaul@gmail.com>
+License: MIT
+Project-URL: Homepage, https://github.com/rdevaul/skill-signer
+Project-URL: Repository, https://github.com/rdevaul/skill-signer.git
+Project-URL: Issues, https://github.com/rdevaul/skill-signer/issues
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Security :: Cryptography
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Provides-Extra: config
+Requires-Dist: pyyaml>=6.0; extra == "config"
+
+# skill-signer
+
+![Tests](https://github.com/rdevaul/skill-signer/actions/workflows/publish.yml/badge.svg)
+
+Cryptographic signing for AI agent skills. Establishes provenance and trust for the agentic ecosystem.
+
+## Why?
+
+AI agent skills are powerful but present a significant attack surface:
+- **Supply chain attacks**: Malicious code in dependencies
+- **Tampering**: Modified skills after publication
+- **Impersonation**: Fake skills claiming to be from trusted sources
+
+`skill-signer` addresses these by enabling cryptographic verification of skill authorship and integrity.
+
+## Quick Start
+
+```bash
+# Install
+pip install skill-signer
+
+# Generate a signing key (--name sets your identity; a .meta sidecar is also written)
+skill-signer keygen --name "user@example.com" --output ~/.ssh/skill_signing_key
+
+# Sign a skill (identity is auto-discovered from the .meta sidecar)
+skill-signer sign ./my-skill --key ~/.ssh/skill_signing_key
+
+# Add the key to trusted signers (identity read from the key comment automatically)
+skill-signer trust add ~/.ssh/skill_signing_key.pub
+
+# Verify a skill
+skill-signer verify ./my-skill --allowed-signers allowed_signers
+```
+
+## Commands
+
+### `keygen` — generate a signing keypair
+
+```
+skill-signer keygen --output <path> [--name <identity>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--output` | **(required)** Path to write the private key |
+| `--name` | Identity / key comment (e.g. `user@example.com`). Defaults to `skill-signing-key`. |
+| `--comment` | Hidden alias for `--name` (backward compatibility) |
+
+After key generation, two extra files are created alongside the private key:
+
+- `<output>.pub` — SSH public key (share this to let others verify your signatures)
+- `<output>.meta` — JSON sidecar with `{"identity": "…", "created": "…"}` so other commands can auto-discover your identity without you having to re-type it every time.
+
+### `sign` — sign a skill directory
+
+```
+skill-signer sign <skill_dir> --key <path> [--identity <identity>] [--version <ver>]
+```
+
+If `--identity` is omitted, `sign` looks for a `.meta` sidecar at `<key>.meta` (written by `keygen`) and reads the identity from it. If neither is available, it exits with a helpful error.
+
+Identities are **normalized to lowercase** before signing to avoid case-sensitivity issues between platforms.
+
+### `trust add` — register a trusted signer
+
+```
+skill-signer trust add [<identity>] <pubkey>
+skill-signer trust add <pubkey>            # identity auto-read from key comment
+```
+
+`identity` is now **optional**. When omitted, the identity is parsed from the SSH public key's comment field (the last token(s) on the pubkey line). If the key has no comment and no identity is supplied, the command exits with an error.
+
+Identities are normalized to lowercase for consistent matching.
+
+### `trust revoke` — revoke a trusted signer
+
+```
+skill-signer trust revoke <identity>
+```
+
+### `trust list` — list trusted signers
+
+```
+skill-signer trust list
+```
+
+### `verify` — verify a signed skill
+
+```
+skill-signer verify <skill_dir> [--allowed-signers <path>]
+```
+
+Identity matching is case-insensitive (normalized at our layer; SSH itself is case-sensitive).
+
+### `inspect` — inspect a manifest without verifying
+
+```
+skill-signer inspect <skill_dir> [--verbose]
+```
+
+### `publish` — publish a signed skill (stub)
+
+```
+skill-signer publish <skill_dir> [--allowed-signers <path>]
+```
+
+Verifies the skill is signed and ready for publication. Shows what would be published to a registry. Full registry integration coming soon.
+
+## Configuration
+
+skill-signer supports optional configuration via `~/.config/skill-signer/config.yaml`:
+
+```yaml
+signing:
+  key: ~/.ssh/skill-signing-key
+  identity: your-email@example.com
+
+verification:
+  allowed_signers: ~/.config/skill-signer/allowed_signers
+  tofu: false
+```
+
+When configured, you can sign skills without specifying `--key` and `--identity` every time:
+
+```bash
+skill-signer sign ./my-skill
+```
+
+Configuration requires PyYAML: `pip install pyyaml` or `pip install skill-signer[config]`
+
+## Identity & Case Normalization
+
+All commands that store or compare identities (sign, verify, trust add) normalize them to
+**lowercase** before use. This means `User@Example.COM` and `user@example.com` are treated as the
+same identity. The normalization happens at the `skill-signer` layer because the underlying
+`ssh-keygen -Y verify` tool performs case-sensitive comparisons.
+
+## Design Principles
+
+1. **Use existing infrastructure** — SSH keys (Ed25519), not custom crypto
+2. **Minimal dependencies** — Core only needs OpenSSH 8.0+
+3. **Compatible with OMS** — Aligns with OpenSSF Model Signing spec
+4. **Transitive trust** — Verify entire dependency tree
+5. **Revocation support** — Handle compromised keys gracefully
+
+## Comparison with Other Solutions
+
+| Feature | skill-signer | ClawHub | Sundial |
+|---------|--------------|---------|---------|
+| **Verification Method** | SSH Ed25519 cryptographic signatures | SHA-256 hash verification | Automated scanning (no crypto) |
+| **Publisher Identity** | Persistent key-based identity | No persistent identity | No cryptographic identity |
+| **Tamper Detection** | Cryptographic signature + file hashes | File hashes only | Pattern-based scanning |
+| **Revocation** | Built-in key revocation | N/A | N/A |
+| **Use Case** | Provenance & trust for skills | Skill distribution | Security scanning |
+
+**skill-signer vs ClawHub**: ClawHub uses SHA-256 hash verification to detect file tampering, but has no mechanism for persistent publisher identity. skill-signer uses SSH Ed25519 key-based provenance — the same model as git commit signing — to establish who published a skill and verify both authorship and integrity.
+
+**skill-signer vs Sundial**: Sundial provides automated security scanning for skills but does not use cryptographic signing. skill-signer complements security scanning with cryptographic provenance, enabling trust chains and accountability.
+
+## Status
+
+🟡 **Beta** — Core signing and verification complete. Registry integration in progress.
+
+All 62 tests passing. Production-ready for signing and verification workflows.
+
+## Roadmap
+
+- **v0.2** — Registry submission protocol (skill publishing to central/federated registries)
+- **v0.3** — TOFU (Trust On First Use) mode for automatic key acceptance
+- **v0.4** — Sigstore integration for transparency log
+
+See [SKILL.md](./SKILL.md) for the full specification.
+
+## License
+
+MIT
+
+## Authors
+
+- Dark Matter Lab, Relativity Space
+- Built with assistance from Jarvis (OpenClaw agent)

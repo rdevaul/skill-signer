@@ -38,6 +38,7 @@ class SignerInfo:
     identity: str
     key_fingerprint: str
     algorithm: str = "ssh-ed25519"
+    key_type: str = "ssh"  # "ssh" or "gpg"
 
 
 @dataclass
@@ -233,41 +234,88 @@ def create_manifest(
 def sign_manifest(
     manifest: SkillManifest,
     key_path: str,
-    identity: str
+    identity: str,
+    key_type: Optional[str] = None
 ) -> SkillManifest:
     """
-    Sign a manifest with an SSH key.
-    
+    Sign a manifest with an SSH or GPG key.
+
     Args:
         manifest: Unsigned manifest
-        key_path: Path to SSH private key
+        key_path: Path to SSH private key, GPG key ID, or path to .asc file
         identity: Signer email/identity
-        
+        key_type: "ssh" or "gpg" (auto-detected if not provided)
+
     Returns:
         Signed manifest with signature field populated
     """
-    from .ssh_signer import sign_data, get_key_fingerprint
-    
-    # Get key fingerprint
-    fingerprint = get_key_fingerprint(os.path.expanduser(key_path))
-    if not fingerprint:
-        raise ValueError(f"Could not get fingerprint for key: {key_path}")
-    
-    # Set signer info
-    manifest.signer = SignerInfo(
-        identity=identity,
-        key_fingerprint=fingerprint,
-        algorithm="ssh-ed25519"
-    )
-    
-    # Sign the payload
-    payload = manifest.signing_payload()
-    result = sign_data(payload, key_path)
-    
-    if not result.success:
-        raise ValueError(f"Signing failed: {result.error}")
-    
-    manifest.signature = result.signature
+    # Auto-detect key type if not specified
+    if key_type is None:
+        # Check if it looks like a GPG key ID (8+ hex chars)
+        if len(key_path) >= 8 and all(c in '0123456789ABCDEFabcdef' for c in key_path):
+            key_type = "gpg"
+        # Check for .asc extension (GPG public key)
+        elif key_path.endswith('.asc'):
+            key_type = "gpg"
+        # Check for .pub extension (SSH public key)
+        elif key_path.endswith('.pub'):
+            key_type = "ssh"
+            # Remove .pub to get private key path
+            key_path = key_path[:-4]
+        else:
+            # Default to SSH
+            key_type = "ssh"
+
+    if key_type == "gpg":
+        from . import gpg_signer
+
+        # Get key fingerprint
+        fingerprint = gpg_signer.get_gpg_key_fingerprint(key_path)
+        if not fingerprint:
+            raise ValueError(f"Could not get fingerprint for GPG key: {key_path}")
+
+        # Set signer info
+        manifest.signer = SignerInfo(
+            identity=identity,
+            key_fingerprint=fingerprint,
+            algorithm="gpg-rsa4096",
+            key_type="gpg"
+        )
+
+        # Sign the payload
+        payload = manifest.signing_payload()
+        result = gpg_signer.sign_data(payload, key_path)
+
+        if not result.success:
+            raise ValueError(f"GPG signing failed: {result.error}")
+
+        manifest.signature = result.signature
+
+    else:  # ssh
+        from .ssh_signer import sign_data, get_key_fingerprint
+
+        # Get key fingerprint
+        fingerprint = get_key_fingerprint(os.path.expanduser(key_path))
+        if not fingerprint:
+            raise ValueError(f"Could not get fingerprint for key: {key_path}")
+
+        # Set signer info
+        manifest.signer = SignerInfo(
+            identity=identity,
+            key_fingerprint=fingerprint,
+            algorithm="ssh-ed25519",
+            key_type="ssh"
+        )
+
+        # Sign the payload
+        payload = manifest.signing_payload()
+        result = sign_data(payload, key_path)
+
+        if not result.success:
+            raise ValueError(f"Signing failed: {result.error}")
+
+        manifest.signature = result.signature
+
     return manifest
 
 
@@ -286,21 +334,25 @@ def load_manifest(manifest_path: str) -> SkillManifest:
     """Load a manifest from JSON file."""
     with open(manifest_path, 'r') as f:
         data = json.load(f)
-    
+
     files = {
         name: FileEntry(**entry)
         for name, entry in data.get("files", {}).items()
     }
-    
+
     deps = [
         Dependency(**dep)
         for dep in data.get("dependencies", [])
     ]
-    
+
     signer = None
     if "signer" in data:
-        signer = SignerInfo(**data["signer"])
-    
+        signer_data = data["signer"]
+        # Backward compatibility: if key_type is not present, assume SSH
+        if "key_type" not in signer_data:
+            signer_data["key_type"] = "ssh"
+        signer = SignerInfo(**signer_data)
+
     return SkillManifest(
         version=data["version"],
         skill_name=data["skill"]["name"],
@@ -312,6 +364,49 @@ def load_manifest(manifest_path: str) -> SkillManifest:
         signer=signer,
         signature=data.get("signature")
     )
+
+
+def verify_manifest(
+    manifest: SkillManifest,
+    allowed_signers_path: str,
+    identity: Optional[str] = None
+) -> VerificationResult:
+    """
+    Verify a manifest signature using SSH or GPG.
+
+    Args:
+        manifest: Manifest to verify
+        allowed_signers_path: Path to allowed_signers file (for SSH) or ignored (for GPG)
+        identity: Expected signer identity (uses manifest.signer.identity if not provided)
+
+    Returns:
+        VerificationResult with validity info
+    """
+    if not manifest.signature or not manifest.signer:
+        from .ssh_signer import VerificationResult
+        return VerificationResult(valid=False, error="Manifest is not signed")
+
+    if identity is None:
+        identity = manifest.signer.identity
+
+    payload = manifest.signing_payload()
+    key_type = getattr(manifest.signer, 'key_type', 'ssh')  # Default to SSH for backward compat
+
+    if key_type == "gpg":
+        from . import gpg_signer
+        return gpg_signer.verify_data(
+            payload,
+            manifest.signature,
+            identity
+        )
+    else:  # ssh
+        from .ssh_signer import verify_data
+        return verify_data(
+            payload,
+            manifest.signature,
+            allowed_signers_path,
+            identity
+        )
 
 
 if __name__ == "__main__":

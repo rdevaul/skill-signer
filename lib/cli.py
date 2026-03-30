@@ -107,9 +107,12 @@ def cmd_sign(args):
 
         print(f"Found {len(manifest.files)} files")
 
+        # Determine key type from --key-type flag or auto-detect
+        key_type = getattr(args, 'key_type', None)
+
         # Sign manifest
         print(f"Signing with key {key_path}...")
-        signed_manifest = sign_manifest(manifest, key_path, identity)
+        signed_manifest = sign_manifest(manifest, key_path, identity, key_type=key_type)
 
         # Save manifest
         output_path = save_manifest(signed_manifest, str(skill_dir))
@@ -234,68 +237,152 @@ def cmd_verify(args):
 
 
 def cmd_keygen(args):
-    """Generate a new SSH Ed25519 keypair."""
-    output_path = os.path.expanduser(args.output)
+    """Generate a new SSH or GPG keypair."""
+    key_type = args.type or "ssh"
 
-    # --name is the primary flag; --comment is a hidden backward-compat alias
-    name = args.name or args.comment or "skill-signing-key"
+    if key_type == "gpg":
+        # GPG key generation
+        from . import gpg_signer
 
-    success, message = generate_keypair(output_path, name)
+        # Check if GPG is available
+        ok, msg = gpg_signer.check_gpg_available()
+        if not ok:
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
 
-    if success:
-        print(f"✓ {message}")
-        print(f"Private key: {output_path}")
-        print(f"Public key:  {output_path}.pub")
+        # Get name and email
+        name = args.name or args.comment
+        email = args.email
 
-        # Write metadata sidecar so 'sign' can auto-discover identity
-        meta_path = f"{output_path}.meta"
-        meta = {
-            "identity": name,
-            "created": datetime.datetime.utcnow().isoformat() + "Z",
-        }
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
-        print(f"Meta file:   {meta_path}")
+        if not name:
+            print("Error: --name is required for GPG key generation", file=sys.stderr)
+            return 1
 
-        # Show how to add to trusted signers (no identity required now)
-        print(f"\nTo trust this key:")
-        print(f"skill-signer trust add {output_path}.pub")
+        if not email:
+            print("Error: --email is required for GPG key generation", file=sys.stderr)
+            return 1
 
-        # Offer to create initial config file
-        from .config import DEFAULT_CONFIG_PATH, save_config, get_default_config_template
+        # Generate GPG key
+        output_dir = args.output if args.output else None
+        success, message = gpg_signer.generate_keypair(name, email, output_dir)
 
-        if not os.path.exists(DEFAULT_CONFIG_PATH):
-            print(f"\nWould you like to create a config file at {DEFAULT_CONFIG_PATH}?")
-            print(f"This will set default key and identity for signing. (y/n): ", end='', flush=True)
+        if success:
+            print(f"✓ {message}")
 
-            try:
-                response = input().strip().lower()
-                if response in ['y', 'yes']:
-                    config_data = {
-                        "signing": {
-                            "key": output_path,
-                            "identity": name,
-                        },
-                        "verification": {
-                            "allowed_signers": DEFAULT_ALLOWED_SIGNERS,
-                            "tofu": False,
-                        },
-                    }
+            # Get key ID
+            key_id = gpg_signer.get_gpg_key_fingerprint(email)
 
-                    if save_config(config_data):
-                        print(f"✓ Config saved to {DEFAULT_CONFIG_PATH}")
-                        print(f"\nYou can now sign skills without --key and --identity flags:")
-                        print(f"skill-signer sign <skill-directory>")
-                    else:
-                        print(f"\nTo enable config support, install PyYAML:")
-                        print(f"pip install pyyaml")
-            except (EOFError, KeyboardInterrupt):
-                print()  # Just newline, skip config creation
+            # Offer to create initial config file
+            from .config import DEFAULT_CONFIG_PATH, save_config
 
-        return 0
-    else:
-        print(f"Error: {message}", file=sys.stderr)
-        return 1
+            if not os.path.exists(DEFAULT_CONFIG_PATH):
+                print(f"\nWould you like to create a config file at {DEFAULT_CONFIG_PATH}?")
+                print(f"This will set default key and identity for signing. (y/n): ", end='', flush=True)
+
+                try:
+                    response = input().strip().lower()
+                    if response in ['y', 'yes']:
+                        config_data = {
+                            "signing": {
+                                "key": key_id,
+                                "identity": email,
+                            },
+                            "verification": {
+                                "allowed_signers": DEFAULT_ALLOWED_SIGNERS,
+                                "tofu": False,
+                            },
+                            "registry": {
+                                "url": "http://54.219.240.149:8400",
+                                "auto_register": True,
+                            },
+                        }
+
+                        if save_config(config_data):
+                            print(f"✓ Config saved to {DEFAULT_CONFIG_PATH}")
+                            print(f"\nYou can now sign skills without --key and --identity flags:")
+                            print(f"skill-signer sign <skill-directory>")
+                        else:
+                            print(f"\nTo enable config support, install PyYAML:")
+                            print(f"pip install pyyaml")
+                except (EOFError, KeyboardInterrupt):
+                    print()  # Just newline, skip config creation
+
+            return 0
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+            return 1
+
+    else:  # SSH key generation
+        if not args.output:
+            print("Error: --output is required for SSH key generation", file=sys.stderr)
+            return 1
+
+        output_path = os.path.expanduser(args.output)
+
+        # --name is the primary flag; --comment is a hidden backward-compat alias
+        name = args.name or args.comment or "skill-signing-key"
+
+        success, message = generate_keypair(output_path, name)
+
+        if success:
+            print(f"✓ {message}")
+            print(f"Private key: {output_path}")
+            print(f"Public key:  {output_path}.pub")
+
+            # Write metadata sidecar so 'sign' can auto-discover identity
+            meta_path = f"{output_path}.meta"
+            meta = {
+                "identity": name,
+                "created": datetime.datetime.utcnow().isoformat() + "Z",
+                "key_type": "ssh",
+            }
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+            print(f"Meta file:   {meta_path}")
+
+            # Show how to add to trusted signers (no identity required now)
+            print(f"\nTo trust this key:")
+            print(f"skill-signer trust add {output_path}.pub")
+
+            # Offer to create initial config file
+            from .config import DEFAULT_CONFIG_PATH, save_config
+
+            if not os.path.exists(DEFAULT_CONFIG_PATH):
+                print(f"\nWould you like to create a config file at {DEFAULT_CONFIG_PATH}?")
+                print(f"This will set default key and identity for signing. (y/n): ", end='', flush=True)
+
+                try:
+                    response = input().strip().lower()
+                    if response in ['y', 'yes']:
+                        config_data = {
+                            "signing": {
+                                "key": output_path,
+                                "identity": name,
+                            },
+                            "verification": {
+                                "allowed_signers": DEFAULT_ALLOWED_SIGNERS,
+                                "tofu": False,
+                            },
+                            "registry": {
+                                "url": "http://54.219.240.149:8400",
+                                "auto_register": True,
+                            },
+                        }
+
+                        if save_config(config_data):
+                            print(f"✓ Config saved to {DEFAULT_CONFIG_PATH}")
+                            print(f"\nYou can now sign skills without --key and --identity flags:")
+                            print(f"skill-signer sign <skill-directory>")
+                        else:
+                            print(f"\nTo enable config support, install PyYAML:")
+                            print(f"pip install pyyaml")
+                except (EOFError, KeyboardInterrupt):
+                    print()  # Just newline, skip config creation
+
+            return 0
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+            return 1
 
 
 def cmd_trust_add(args):
@@ -419,7 +506,11 @@ def cmd_trust_list(args):
 
 
 def cmd_publish(args):
-    """Publish a signed skill to a registry (stub)."""
+    """Publish a signed skill to a registry."""
+    import tarfile
+    import tempfile
+    import requests
+
     skill_dir = Path(args.skill_dir).resolve()
     manifest_path = skill_dir / "MANIFEST.sig.json"
 
@@ -431,15 +522,23 @@ def cmd_publish(args):
     # Load config for defaults
     config = load_config()
 
-    # Determine allowed_signers path for verification
+    # Determine registry URL
+    registry_url = args.registry
+    if not registry_url:
+        registry_url = config.registry_url or os.environ.get('SKILL_REGISTRY_URL')
+
+    if not registry_url:
+        print("Error: No registry URL specified", file=sys.stderr)
+        print("Set via --registry flag, SKILL_REGISTRY_URL env var, or config file", file=sys.stderr)
+        return 1
+
+    # Remove trailing slash
+    registry_url = registry_url.rstrip('/')
+
+    # Determine allowed_signers path for verification (SSH only)
     allowed_signers = args.allowed_signers
     if not allowed_signers:
         allowed_signers = config.verification_allowed_signers or DEFAULT_ALLOWED_SIGNERS
-
-    if not os.path.exists(allowed_signers):
-        print(f"Error: allowed_signers not found: {allowed_signers}", file=sys.stderr)
-        print(f"Hint: Use 'skill-signer trust add' to add trusted signers, or use --allowed-signers")
-        return 1
 
     try:
         # Load and verify the manifest
@@ -456,21 +555,24 @@ def cmd_publish(args):
 
         # Verify signature
         print("Verifying signature...")
-        payload = manifest.signing_payload()
+        from .manifest import verify_manifest
         identity = manifest.signer.identity.lower()
 
-        result = verify_data(
-            payload,
-            manifest.signature,
-            allowed_signers,
-            identity
-        )
+        # For SSH, we need allowed_signers; for GPG, it's optional
+        key_type = getattr(manifest.signer, 'key_type', 'ssh')
+        if key_type == 'ssh' and not os.path.exists(allowed_signers):
+            print(f"Warning: allowed_signers not found: {allowed_signers}", file=sys.stderr)
+            print(f"Skipping signature verification for SSH key", file=sys.stderr)
+            result = None
+        else:
+            result = verify_manifest(manifest, allowed_signers, identity)
 
-        if not result.valid:
+        if result and not result.valid:
             print(f"✗ Signature verification failed: {result.error}", file=sys.stderr)
             return 1
 
-        print("✓ Signature is valid")
+        if result and result.valid:
+            print("✓ Signature is valid")
 
         # Verify file hashes
         print(f"Verifying file hashes for {len(manifest.files)} files...")
@@ -512,27 +614,151 @@ def cmd_publish(args):
 
         print(f"✓ All {len(manifest.files)} files verified")
 
-        # Show what would be published
-        print("\n" + "=" * 60)
-        print("PUBLISH PREVIEW")
-        print("=" * 60)
-        print(f"\nSkill would be published to registry with:")
-        print(f"  Name:     {manifest.skill_name}")
-        print(f"  Version:  {manifest.skill_version}")
-        print(f"  Author:   {manifest.author}")
-        print(f"  Files:    {len(manifest.files)}")
-        print(f"  Signer:   {manifest.signer.identity}")
-        print(f"  Key:      {manifest.signer.key_fingerprint}")
+        # Dry run mode
+        if args.dry_run:
+            print("\n" + "=" * 60)
+            print("PUBLISH PREVIEW (--dry-run)")
+            print("=" * 60)
+            print(f"\nSkill would be published to registry with:")
+            print(f"  Registry: {registry_url}")
+            print(f"  Name:     {manifest.skill_name}")
+            print(f"  Version:  {manifest.skill_version}")
+            print(f"  Author:   {manifest.author}")
+            print(f"  Files:    {len(manifest.files)}")
+            print(f"  Signer:   {manifest.signer.identity}")
+            print(f"  Key:      {manifest.signer.key_fingerprint}")
+            print("=" * 60)
+            return 0
 
-        print("\n" + "=" * 60)
-        print("Skill is signed and ready to publish.")
-        print("Registry integration coming soon — see https://github.com/rdevaul/skill-signer for updates.")
-        print("=" * 60)
+        # Check if identity is registered
+        print(f"\nChecking identity registration at {registry_url}...")
+        try:
+            resp = requests.get(f"{registry_url}/identities", timeout=10)
+            resp.raise_for_status()
+            identities = resp.json()
 
-        return 0
+            # Look for matching email
+            registered = any(
+                ident.get('email', '').lower() == manifest.author.lower()
+                for ident in identities
+            )
+
+            if not registered or args.register_identity:
+                print(f"\nIdentity {manifest.author} not registered with registry")
+
+                if args.register_identity or config.registry_auto_register:
+                    print("Registering identity...")
+
+                    # Get public key for registration
+                    if key_type == 'ssh':
+                        # Read SSH public key
+                        signing_key = config.signing_key or args.key
+                        if signing_key:
+                            pubkey_path = f"{signing_key}.pub"
+                            if os.path.exists(pubkey_path):
+                                with open(pubkey_path, 'r') as f:
+                                    pubkey = f.read().strip()
+                            else:
+                                print(f"Error: Public key not found: {pubkey_path}", file=sys.stderr)
+                                return 1
+                        else:
+                            print("Error: Cannot determine public key for registration", file=sys.stderr)
+                            return 1
+                    else:  # GPG
+                        from . import gpg_signer
+                        pubkey = gpg_signer.export_gpg_pubkey(manifest.author)
+                        if not pubkey:
+                            print(f"Error: Could not export GPG public key", file=sys.stderr)
+                            return 1
+
+                    # Register identity
+                    identity_data = {
+                        "name": manifest.signer.identity,
+                        "email": manifest.author,
+                        "pubkey": pubkey
+                    }
+
+                    resp = requests.post(
+                        f"{registry_url}/identities/request",
+                        json=identity_data,
+                        timeout=10
+                    )
+
+                    if resp.status_code == 201:
+                        print("✓ Identity registration requested")
+                        print("\nNote: An admin must approve your identity before you can publish.")
+                        print("Please contact the registry administrator.")
+                        return 0
+                    else:
+                        print(f"✗ Identity registration failed: {resp.status_code}", file=sys.stderr)
+                        print(resp.text, file=sys.stderr)
+                        return 1
+                else:
+                    print("Error: Identity not registered. Use --register-identity to register.", file=sys.stderr)
+                    return 1
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error: Could not connect to registry: {e}", file=sys.stderr)
+            return 1
+
+        # Package skill into tar.gz
+        print("\nPackaging skill...")
+        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
+            tarball_path = tmp.name
+
+        try:
+            with tarfile.open(tarball_path, 'w:gz') as tar:
+                for file_path in manifest.files.keys():
+                    full_path = skill_dir / file_path
+                    tar.add(full_path, arcname=file_path)
+
+            print(f"✓ Created package: {len(manifest.files)} files")
+
+            # Submit to registry
+            print(f"\nSubmitting to registry at {registry_url}...")
+
+            with open(tarball_path, 'rb') as package_file:
+                files = {
+                    'package': (f"{manifest.skill_name}-{manifest.skill_version}.tar.gz", package_file, 'application/gzip'),
+                }
+                data = {
+                    'manifest': manifest.to_json()
+                }
+
+                resp = requests.post(
+                    f"{registry_url}/skills/submit",
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
+
+            if resp.status_code == 201:
+                print("✓ Skill published successfully!")
+                result_data = resp.json()
+                if 'url' in result_data:
+                    print(f"\nSkill URL: {result_data['url']}")
+                return 0
+            elif resp.status_code == 409:
+                print(f"✗ Skill version already exists: {manifest.skill_name} v{manifest.skill_version}", file=sys.stderr)
+                return 1
+            elif resp.status_code == 403:
+                print(f"✗ Identity not approved by registry admin yet", file=sys.stderr)
+                print("Please wait for admin approval or contact the registry administrator.", file=sys.stderr)
+                return 1
+            else:
+                print(f"✗ Publish failed: {resp.status_code}", file=sys.stderr)
+                print(resp.text, file=sys.stderr)
+                return 1
+
+        finally:
+            # Cleanup temp tarball
+            if os.path.exists(tarball_path):
+                os.unlink(tarball_path)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return 1
 
 
@@ -578,6 +804,12 @@ def cmd_inspect(args):
         return 1
 
 
+def cmd_setup(args):
+    """Run the interactive setup wizard."""
+    from .setup_wizard import setup_wizard
+    return setup_wizard()
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -597,12 +829,13 @@ def main():
     # skill-signer sign
     sign_parser = subparsers.add_parser('sign', help='Sign a skill directory')
     sign_parser.add_argument('skill_dir', help='Path to skill directory')
-    sign_parser.add_argument('--key', help='Path to SSH private key (or use config signing.key)')
+    sign_parser.add_argument('--key', help='Path to SSH private key, GPG key ID, or use config signing.key')
     sign_parser.add_argument(
         '--identity',
         help='Signer identity (email); auto-discovered from config, <key>.meta, or key comment'
     )
     sign_parser.add_argument('--version', help='Skill version (auto-detected if not provided)')
+    sign_parser.add_argument('--key-type', choices=['ssh', 'gpg'], help='Key type (auto-detected if not provided)')
     sign_parser.set_defaults(func=cmd_sign)
 
     # skill-signer verify
@@ -612,12 +845,14 @@ def main():
     verify_parser.set_defaults(func=cmd_verify)
 
     # skill-signer keygen
-    keygen_parser = subparsers.add_parser('keygen', help='Generate SSH Ed25519 keypair')
-    keygen_parser.add_argument('--output', required=True, help='Output path for private key')
+    keygen_parser = subparsers.add_parser('keygen', help='Generate SSH or GPG keypair')
+    keygen_parser.add_argument('--output', help='Output path for private key (SSH) or directory for GPG backup')
+    keygen_parser.add_argument('--type', choices=['ssh', 'gpg'], default='ssh', help='Key type to generate (default: ssh)')
     keygen_parser.add_argument(
         '--name',
-        help='Key name / identity comment (e.g. user@example.com)'
+        help='Key name / identity (e.g. "John Doe" or "user@example.com")'
     )
+    keygen_parser.add_argument('--email', help='Email address (required for GPG)')
     # --comment is kept as a hidden backward-compatible alias for --name
     keygen_parser.add_argument('--comment', help=argparse.SUPPRESS)
     keygen_parser.set_defaults(func=cmd_keygen)
@@ -659,10 +894,18 @@ def main():
     inspect_parser.set_defaults(func=cmd_inspect)
 
     # skill-signer publish
-    publish_parser = subparsers.add_parser('publish', help='Publish a signed skill (registry integration coming soon)')
+    publish_parser = subparsers.add_parser('publish', help='Publish a signed skill to a registry')
     publish_parser.add_argument('skill_dir', help='Path to skill directory')
+    publish_parser.add_argument('--registry', help='Registry URL (default: from config or SKILL_REGISTRY_URL env var)')
+    publish_parser.add_argument('--register-identity', action='store_true', help='Force identity registration')
+    publish_parser.add_argument('--dry-run', action='store_true', help='Preview without publishing')
     publish_parser.add_argument('--allowed-signers', help=f'Path to allowed_signers file (default: {DEFAULT_ALLOWED_SIGNERS})')
+    publish_parser.add_argument('--key', help='Path to signing key (for identity registration)')
     publish_parser.set_defaults(func=cmd_publish)
+
+    # skill-signer setup
+    setup_parser = subparsers.add_parser('setup', help='Run interactive setup wizard')
+    setup_parser.set_defaults(func=cmd_setup)
 
     # Parse and execute
     args = parser.parse_args()

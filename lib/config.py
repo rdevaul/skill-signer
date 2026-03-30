@@ -47,6 +47,16 @@ class Config:
         """Whether TOFU (Trust On First Use) mode is enabled."""
         return self._data.get("verification", {}).get("tofu", False)
 
+    @property
+    def registry_url(self) -> Optional[str]:
+        """Default registry URL."""
+        return self._data.get("registry", {}).get("url")
+
+    @property
+    def registry_auto_register(self) -> bool:
+        """Whether to automatically offer identity registration."""
+        return self._data.get("registry", {}).get("auto_register", True)
+
 
 def load_config(config_path: Optional[str] = None) -> Config:
     """
@@ -138,6 +148,10 @@ def get_default_config_template() -> Dict[str, Any]:
         "verification": {
             "allowed_signers": "~/.config/skill-signer/allowed_signers",
             "tofu": False,
+        },
+        "registry": {
+            "url": "http://54.219.240.149:8400",
+            "auto_register": True,
         },
     }
 
