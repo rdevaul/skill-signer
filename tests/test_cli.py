@@ -101,7 +101,7 @@ def test_cli_sign_and_inspect():
         
         # Sign the skill
         stdout, stderr, code = run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "test@example.com",
             "--version", "1.2.3"
@@ -165,7 +165,7 @@ def test_cli_sign_missing_key():
         (skill_dir / "main.py").write_text("test")
         
         stdout, stderr, code = run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", "/nonexistent/key",
             "--identity", "test@example.com",
             expect_success=False
@@ -274,7 +274,7 @@ def test_cli_verify():
         assert success
         
         run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "test@example.com"
         )
@@ -436,7 +436,7 @@ def test_cli_sign_uses_meta_file():
 
         # sign WITHOUT --identity flag; should auto-discover from .meta
         stdout, stderr, code = run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             # intentionally omitting --identity
         )
@@ -464,7 +464,7 @@ def test_cli_sign_missing_identity_no_meta():
         Path(key_path).write_text("not-a-real-key")
 
         stdout, stderr, code = run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             expect_success=False,
         )
@@ -538,7 +538,7 @@ def test_cli_case_normalization():
 
         # Sign with a MIXED-CASE identity
         run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "Case@Example.COM",
             "--version", "0.1.0",
@@ -584,7 +584,7 @@ def test_cli_verify_file_hashes_unmodified():
         assert success
 
         run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "test@example.com"
         )
@@ -625,7 +625,7 @@ def test_cli_verify_file_modified():
         assert success
 
         run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "test@example.com"
         )
@@ -671,7 +671,7 @@ def test_cli_verify_file_missing():
         assert success
 
         run_cli(
-            "sign", str(skill_dir),
+            "sign", str(skill_dir), "--manifest-version", "1",
             "--key", key_path,
             "--identity", "test@example.com"
         )

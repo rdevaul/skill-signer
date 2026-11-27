@@ -20,6 +20,8 @@ from . import (
     verify_data,
     check_ssh_version,
 )
+from . import manifest_v2
+from .ssh_signer import get_key_fingerprint
 from .trust import add_signer, revoke_signer, list_signers, fetch_pubkey
 from .config import load_config
 
@@ -58,6 +60,9 @@ def cmd_sign(args):
     if not os.path.exists(key_path):
         print(f"Error: Key not found: {key_path}", file=sys.stderr)
         return 1
+
+    if getattr(args, 'manifest_version', 2) == 2:
+        return _sign_v2(args, skill_dir, key_path)
 
     # Determine identity: from --identity flag, config, or .meta sidecar file
     identity = args.identity
@@ -129,14 +134,189 @@ def cmd_sign(args):
         return 1
 
 
+def _requires_from_args(args):
+    """The --network/--secret/--read-only flags, or None if none was given."""
+    network = getattr(args, 'network', None)
+    secrets = getattr(args, 'secret', None)
+    read_only = getattr(args, 'read_only', None)
+    if network is None and not secrets and not read_only:
+        return None
+    return manifest_v2.Requires(
+        network=network or "none", secrets=secrets or [], read_only=read_only or []
+    )
+
+
+def _write_v2(skill_dir, key_path, **fields):
+    """Build, sign and write a version 2 manifest; print what was written."""
+    manifest = manifest_v2.build_manifest(skill_dir, **fields)
+    print(f"Found {len(manifest.files)} files")
+    clutter = manifest_v2.find_clutter(manifest.files)
+    if clutter:
+        print(
+            f"Warning: {len(clutter)} listed file(s) look like they were not meant to be "
+            f"published (first: {clutter[0]}). Every file in the directory is signed; "
+            f"remove what does not belong and sign again.",
+            file=sys.stderr,
+        )
+    print(f"Signing with key {key_path}...")
+    manifest_hash = manifest_v2.sign_skill(skill_dir, manifest, key_path)
+    print(f"Saved signed manifest: {skill_dir / manifest_v2.MANIFEST_NAME}")
+    print(f"Saved signature: {skill_dir / manifest_v2.SIGNATURE_NAME}")
+    print(f"Skill: {manifest.name} v{manifest.version}")
+    print(f"Manifest SHA256: {manifest_hash}")
+    fingerprint = get_key_fingerprint(key_path)
+    if fingerprint:
+        print(f"Signature: {fingerprint}")
+
+
+def _sign_v2(args, skill_dir, key_path):
+    """Sign a skill directory with a version 2 manifest (SSH keys only)."""
+    if getattr(args, 'key_type', None) == 'gpg':
+        print(
+            "Error: manifest version 2 is signed with SSH keys only. "
+            "Use --manifest-version 1 for a GPG signature.",
+            file=sys.stderr,
+        )
+        return 1
+    if key_path.endswith('.pub'):
+        key_path = key_path[:-4]
+    if (skill_dir / manifest_v2.LEGACY_MANIFEST_NAME).exists():
+        print(
+            f"Error: {skill_dir.name} holds a version 1 manifest "
+            f"({manifest_v2.LEGACY_MANIFEST_NAME}). Run 'skill-signer resign' to check it "
+            f"and replace it with version 2, or pass --manifest-version 1.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        print(f"Creating manifest for {skill_dir.name}...")
+        _write_v2(
+            skill_dir, key_path,
+            name=getattr(args, 'name', None),
+            version=args.version,
+            description=getattr(args, 'description', None),
+            scripts=getattr(args, 'script', None),
+            requires=_requires_from_args(args),
+        )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def _verify_v2(skill_dir, allowed_signers):
+    try:
+        verified = manifest_v2.verify_skill(skill_dir, allowed_signers)
+    except manifest_v2.ManifestError as e:
+        print(f"\u2717 Verification failed: {e}", file=sys.stderr)
+        return 1
+    manifest = verified.manifest
+    print(f"Skill: {manifest.name} v{manifest.version}")
+    print(f"Signer: {verified.signer}")
+    print(f"Manifest SHA256: {verified.manifest_sha256}")
+    print("\u2713 Signature is valid")
+    print(f"\u2713 All {len(manifest.files)} files verified")
+    return 0
+
+
+def cmd_resign(args):
+    """Replace a version 1 manifest with a version 2 one."""
+    skill_dir = Path(args.skill_dir).resolve()
+    legacy_path = skill_dir / manifest_v2.LEGACY_MANIFEST_NAME
+    if not legacy_path.is_file():
+        print(f"Error: No version 1 manifest found: {legacy_path}", file=sys.stderr)
+        print("Hint: use 'skill-signer sign' for a directory that has none", file=sys.stderr)
+        return 1
+
+    config = load_config()
+    key_path = args.key or config.signing_key
+    if not key_path:
+        print("Error: --key is required (or set signing.key in the config file)", file=sys.stderr)
+        return 1
+    key_path = os.path.expanduser(key_path)
+    if key_path.endswith('.pub'):
+        key_path = key_path[:-4]
+    if not os.path.exists(key_path):
+        print(f"Error: Key not found: {key_path}", file=sys.stderr)
+        return 1
+
+    try:
+        legacy = load_manifest(str(legacy_path))
+    except Exception as e:
+        print(f"Error: cannot read {legacy_path.name}: {e}", file=sys.stderr)
+        return 1
+
+    if args.skip_check:
+        print("Skipping the check of the version 1 manifest (--skip-check)")
+    else:
+        # The old signature is the only evidence that these are the files
+        # that were published. Check it before signing them again.
+        print(f"Checking the version 1 manifest before replacing it...")
+        verify_args = argparse.Namespace(
+            skill_dir=str(skill_dir), allowed_signers=args.allowed_signers
+        )
+        if _verify_v1(verify_args, skill_dir, legacy_path) != 0:
+            print(
+                "Error: the version 1 manifest did not verify, so the skill was not "
+                "re-signed. Pass --skip-check to sign the files as they are now.",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        # Check that the new manifest can be built before removing anything.
+        fields = dict(
+            name=args.name,
+            version=args.version or legacy.skill_version,
+            description=args.description,
+            scripts=args.script,
+            requires=_requires_from_args(args),
+        )
+        legacy_bytes = legacy_path.read_bytes()
+        legacy_path.unlink()
+        try:
+            _write_v2(skill_dir, key_path, **fields)
+        except BaseException:
+            legacy_path.write_bytes(legacy_bytes)
+            raise
+        print(f"Removed {legacy_path.name}")
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_verify(args):
     """Verify a signed skill directory."""
     skill_dir = Path(args.skill_dir).resolve()
     manifest_path = skill_dir / "MANIFEST.sig.json"
+    v2_path = skill_dir / manifest_v2.MANIFEST_NAME
 
-    if not manifest_path.exists():
-        print(f"Error: No manifest found: {manifest_path}", file=sys.stderr)
+    if not manifest_path.exists() and not v2_path.exists():
+        print(f"Error: No manifest found: {v2_path}", file=sys.stderr)
         return 1
+
+    if v2_path.exists():
+        config = load_config()
+        allowed_signers = args.allowed_signers
+        if not allowed_signers:
+            allowed_signers = config.verification_allowed_signers or DEFAULT_ALLOWED_SIGNERS
+        if not os.path.exists(allowed_signers):
+            print(f"Error: allowed_signers not found: {allowed_signers}", file=sys.stderr)
+            print(f"Hint: Use 'skill-signer trust add' to add trusted signers")
+            return 1
+        return _verify_v2(skill_dir, allowed_signers)
+
+    print(
+        "Note: this is a version 1 manifest. It does not cover dotfiles and names its "
+        "own signer; run 'skill-signer resign' to replace it with version 2.",
+        file=sys.stderr,
+    )
+    return _verify_v1(args, skill_dir, manifest_path)
+
+
+def _verify_v1(args, skill_dir, manifest_path):
+    """Verify a version 1 (MANIFEST.sig.json) skill directory."""
 
     # Load config for defaults
     config = load_config()
@@ -516,7 +696,14 @@ def cmd_publish(args):
 
     if not manifest_path.exists():
         print(f"Error: No manifest found: {manifest_path}", file=sys.stderr)
-        print(f"Hint: Sign the skill first with 'skill-signer sign'", file=sys.stderr)
+        if (skill_dir / manifest_v2.MANIFEST_NAME).exists():
+            print(
+                "This skill has a version 2 manifest, which the registry does not accept yet. "
+                "Sign with 'skill-signer sign --manifest-version 1' to publish.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Hint: Sign the skill first with 'skill-signer sign --manifest-version 1'", file=sys.stderr)
         return 1
 
     # Load config for defaults
@@ -762,18 +949,60 @@ def cmd_publish(args):
         return 1
 
 
+def _inspect_v2(args, skill_dir, v2_path):
+    """Print a version 2 manifest. Nothing is verified."""
+    import hashlib
+    try:
+        data = v2_path.read_bytes()
+        manifest = manifest_v2.parse_manifest(data)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print("Manifest version: 2")
+    print(f"Skill: {manifest.name} v{manifest.version}")
+    print(f"Description: {manifest.description}")
+    print(f"Manifest SHA256: {hashlib.sha256(data).hexdigest()}")
+    print(f"Files: {len(manifest.files)}")
+    if manifest.scripts:
+        print(f"Scripts: {', '.join(manifest.scripts)}")
+    else:
+        print("Scripts: none (instruction-only)")
+    requires = manifest.requires
+    print(f"Requires network: {requires.network}")
+    if requires.secrets:
+        print(f"Requires secrets: {', '.join(requires.secrets)}")
+    if requires.read_only:
+        print(f"Requires read-only: {', '.join(requires.read_only)}")
+    if (skill_dir / manifest_v2.SIGNATURE_NAME).exists():
+        print("Status: signed (not verified; the signer is whoever 'verify' finds for the key)")
+    else:
+        print("Status: UNSIGNED")
+    if args.verbose:
+        print("\nFiles:")
+        for path in sorted(manifest.files):
+            print(f"  {path}")
+            print(f"    SHA256: {manifest.files[path]['sha256']}")
+            print(f"    Size: {manifest.files[path]['size']} bytes")
+    return 0
+
+
 def cmd_inspect(args):
     """Inspect a skill manifest without verifying."""
     skill_dir = Path(args.skill_dir).resolve()
     manifest_path = skill_dir / "MANIFEST.sig.json"
+    v2_path = skill_dir / manifest_v2.MANIFEST_NAME
+
+    if v2_path.exists():
+        return _inspect_v2(args, skill_dir, v2_path)
 
     if not manifest_path.exists():
-        print(f"Error: No manifest found: {manifest_path}", file=sys.stderr)
+        print(f"Error: No manifest found: {v2_path}", file=sys.stderr)
         return 1
 
     try:
         manifest = load_manifest(str(manifest_path))
 
+        print("Manifest version: 1")
         print(f"Skill: {manifest.skill_name} v{manifest.skill_version}")
         print(f"Author: {manifest.author}")
         print(f"Timestamp: {manifest.timestamp}")
@@ -810,6 +1039,30 @@ def cmd_setup(args):
     return setup_wizard()
 
 
+def _add_v2_fields(parser):
+    """The fields a version 2 manifest declares."""
+    group = parser.add_argument_group(
+        'manifest version 2',
+        'A value not given is kept from the existing MANIFEST.json, then read from '
+        'SKILL.md front matter.'
+    )
+    group.add_argument('--name', help='Skill name: a-z, 0-9, "-" and "_" (default: the directory name)')
+    group.add_argument('--description', help='One or two sentences, at most 500 characters')
+    group.add_argument(
+        '--script', action='append', metavar='PATH',
+        help='A file in the skill that an agent may be asked to run (repeatable)'
+    )
+    group.add_argument(
+        '--network', choices=list(manifest_v2.NETWORK_LEVELS),
+        help='Network access the scripts need (default: none)'
+    )
+    group.add_argument('--secret', action='append', metavar='NAME', help='A named secret the scripts need (repeatable)')
+    group.add_argument(
+        '--read-only', action='append', metavar='PATH', dest='read_only',
+        help='A path outside the skill the scripts need to read (repeatable)'
+    )
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -836,7 +1089,28 @@ def main():
     )
     sign_parser.add_argument('--version', help='Skill version (auto-detected if not provided)')
     sign_parser.add_argument('--key-type', choices=['ssh', 'gpg'], help='Key type (auto-detected if not provided)')
+    sign_parser.add_argument(
+        '--manifest-version', type=int, choices=[1, 2], default=2,
+        help='2 (default): MANIFEST.json and a detached OpenSSH signature. '
+             '1: the older MANIFEST.sig.json'
+    )
+    _add_v2_fields(sign_parser)
     sign_parser.set_defaults(func=cmd_sign)
+
+    # skill-signer resign
+    resign_parser = subparsers.add_parser(
+        'resign', help='Check a version 1 manifest and replace it with version 2'
+    )
+    resign_parser.add_argument('skill_dir', help='Path to skill directory')
+    resign_parser.add_argument('--key', help='Path to SSH private key, or use config signing.key')
+    resign_parser.add_argument('--version', help='Skill version (default: the version 1 manifest\'s)')
+    resign_parser.add_argument('--allowed-signers', help=f'Path to allowed_signers file (default: {DEFAULT_ALLOWED_SIGNERS})')
+    resign_parser.add_argument(
+        '--skip-check', action='store_true',
+        help='Do not verify the version 1 manifest first; sign the files as they are now'
+    )
+    _add_v2_fields(resign_parser)
+    resign_parser.set_defaults(func=cmd_resign)
 
     # skill-signer verify
     verify_parser = subparsers.add_parser('verify', help='Verify a signed skill directory')
