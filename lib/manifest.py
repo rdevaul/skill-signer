@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 
-from .ssh_signer import sign_data, get_key_fingerprint
+from .ssh_signer import sign_data, get_key_fingerprint, VerificationResult
 
 
 @dataclass

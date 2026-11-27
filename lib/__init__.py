@@ -19,6 +19,8 @@ from .manifest import (
     load_manifest,
 )
 
+from . import manifest_v2
+
 from .trust import (
     add_signer,
     revoke_signer,
@@ -41,6 +43,7 @@ __all__ = [
     "sign_manifest",
     "save_manifest",
     "load_manifest",
+    "manifest_v2",
     "add_signer",
     "revoke_signer",
     "list_signers",

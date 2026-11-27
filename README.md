@@ -22,8 +22,9 @@ pip install skill-signer
 # Generate a signing key (--name sets your identity; a .meta sidecar is also written)
 skill-signer keygen --name "user@example.com" --output ~/.ssh/skill_signing_key
 
-# Sign a skill (identity is auto-discovered from the .meta sidecar)
-skill-signer sign ./my-skill --key ~/.ssh/skill_signing_key
+# Sign a skill: writes MANIFEST.json and MANIFEST.json.sig
+skill-signer sign ./my-skill --key ~/.ssh/skill_signing_key \
+    --description "What this skill does, in a sentence or two."
 
 # Add the key to trusted signers (identity read from the key comment automatically)
 skill-signer trust add ~/.ssh/skill_signing_key.pub
@@ -54,12 +55,63 @@ After key generation, two extra files are created alongside the private key:
 ### `sign` — sign a skill directory
 
 ```
-skill-signer sign <skill_dir> --key <path> [--identity <identity>] [--version <ver>]
+skill-signer sign <skill_dir> --key <path> [--name <name>] [--version <ver>]
+    [--description <text>] [--script <path>]... [--network none|loopback|full]
+    [--secret <name>]... [--read-only <path>]...
 ```
 
-If `--identity` is omitted, `sign` looks for a `.meta` sidecar at `<key>.meta` (written by `keygen`) and reads the identity from it. If neither is available, it exits with a helpful error.
+Writes a **version 2 manifest**: two files at the top of the skill directory.
 
-Identities are **normalized to lowercase** before signing to avoid case-sensitivity issues between platforms.
+| File | Content |
+|---|---|
+| `MANIFEST.json` | The manifest |
+| `MANIFEST.json.sig` | An OpenSSH signature over the exact bytes of `MANIFEST.json`, namespace `skill-manifest` |
+
+```json
+{
+  "manifest_version": 2,
+  "name": "my-skill",
+  "version": "1.4.0",
+  "description": "What this skill does, in a sentence or two.",
+  "files": {
+    "SKILL.md": {"sha256": "…", "size": 4180},
+    "scripts/export.py": {"sha256": "…", "size": 912}
+  },
+  "scripts": ["scripts/export.py"],
+  "requires": {"network": "none", "secrets": [], "read_only": []}
+}
+```
+
+- **Every file is listed.** Dotfiles, `__pycache__`, `node_modules`: whatever is in the directory is signed, and `verify` fails on any file that is not listed. `sign` warns about files that look like clutter; remove them and sign again.
+- **Symbolic links are refused**, along with anything else that is not a regular file or a directory.
+- **The signer is not in the manifest.** Whoever verifies finds the signer in their own `allowed_signers` file, by the key that made the signature. `sign` needs no `--identity`.
+- **`scripts`** are the files the skill may ask an agent to run; a skill with none is instruction-only. **`requires`** says what those scripts need from a sandboxed shell. A loader such as xshell uses both to decide where the skill may be used.
+- The skill's identity is the SHA-256 of `MANIFEST.json`, which `sign` prints.
+- Limits: 512 files, 64 MiB in total, paths of at most 255 bytes, and no two paths that differ only by letter case.
+
+`--name` defaults to the directory's name and must be 1–64 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter. `--description` is required the first time (at most 500 characters). A value you do not give is kept from the existing `MANIFEST.json`, then read from `name:`, `version:` and `description:` lines in `SKILL.md` front matter, so signing again after an edit needs only `--key`.
+
+Because the signature is over the stored file, stock OpenSSH can check a skill with no other tool:
+
+```bash
+ssh-keygen -Y verify -f allowed_signers -I user@example.com \
+    -n skill-manifest -s MANIFEST.json.sig < MANIFEST.json
+```
+
+(That checks the manifest only. `skill-signer verify` also checks every file against it.)
+
+#### Version 1 manifests
+
+`sign --manifest-version 1` writes the older single file, `MANIFEST.sig.json`, and is the only form that supports GPG keys and `publish` today. It takes `--identity` (or reads it from the key's `.meta` sidecar) and records it, lowercased, in the manifest. Version 1 skips dotfiles, `__pycache__` and `node_modules`, follows symbolic links, and takes the signer's identity from the manifest being checked, so prefer version 2 for anything a program will load.
+
+### `resign` — move a skill from version 1 to version 2
+
+```
+skill-signer resign <skill_dir> --key <path> [--allowed-signers <path>] [--skip-check]
+    [--description <text>] [...the same fields as sign]
+```
+
+Verifies the version 1 manifest (signature and file hashes), then writes version 2 and removes `MANIFEST.sig.json`. If the old manifest does not verify, nothing is changed; `--skip-check` signs the files as they are now. The version is carried over; files version 1 left out (dotfiles, for example) are now listed.
 
 ### `trust add` — register a trusted signer
 
@@ -90,7 +142,9 @@ skill-signer trust list
 skill-signer verify <skill_dir> [--allowed-signers <path>]
 ```
 
-Identity matching is case-insensitive (normalized at our layer; SSH itself is case-sensitive).
+For a version 2 skill this checks, in order: the signature over `MANIFEST.json` by a key in `allowed_signers` that is trusted for the `skill-manifest` namespace; that the manifest is well formed (no unknown fields, no duplicate keys); and that the directory holds exactly the listed files with the listed sizes and hashes, and no links. It prints the signer it found for the key.
+
+A directory with only `MANIFEST.sig.json` is checked as version 1, with a note. There, identity matching is case-insensitive (normalized at our layer; SSH itself is case-sensitive).
 
 ### `inspect` — inspect a manifest without verifying
 
@@ -104,7 +158,7 @@ skill-signer inspect <skill_dir> [--verbose]
 skill-signer publish <skill_dir> [--allowed-signers <path>]
 ```
 
-Verifies the skill is signed and ready for publication. Shows what would be published to a registry. Full registry integration coming soon.
+Takes a version 1 manifest; the registry does not accept version 2 yet. Verifies the skill is signed and ready for publication. Shows what would be published to a registry. Full registry integration coming soon.
 
 ## Configuration
 
@@ -161,7 +215,7 @@ same identity. The normalization happens at the `skill-signer` layer because the
 
 🟡 **Beta** — Core signing and verification complete. Registry integration in progress.
 
-All 62 tests passing. Production-ready for signing and verification workflows.
+Production-ready for signing and verification workflows.
 
 ## Roadmap
 

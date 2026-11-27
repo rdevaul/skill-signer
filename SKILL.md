@@ -17,11 +17,18 @@ Uses SSH signing (Ed25519) as the primary mechanism, with GPG and Sigstore as al
 
 ### sign
 
-Sign a skill directory, generating `MANIFEST.sig.json`:
+Sign a skill directory, generating `MANIFEST.json` and a detached OpenSSH
+signature, `MANIFEST.json.sig` (manifest version 2; see the README for the
+format and its rules):
 
 ```bash
-skill-signer sign ./my-skill --key ~/.ssh/skill_signing_key
+skill-signer sign ./my-skill --key ~/.ssh/skill_signing_key \
+    --description "What this skill does."
 ```
+
+`--manifest-version 1` writes the older `MANIFEST.sig.json` described under
+"Manifest Format" below. `skill-signer resign` moves a skill from version 1
+to version 2.
 
 ### verify
 
@@ -51,7 +58,7 @@ skill-signer keygen --name "My Org Skills" --output ~/.ssh/skill_signing_key
 
 ## Manifest Format
 
-`MANIFEST.sig.json` structure:
+`MANIFEST.sig.json` (version 1) structure:
 
 ```json
 {
